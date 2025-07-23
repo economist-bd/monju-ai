@@ -41,12 +41,12 @@
         <!-- Header Section -->
         <header class="border-b border-slate-200 pb-4 mb-4">
             <h1 class="text-2xl md:text-3xl font-bold text-slate-800 text-center">কবিতার খাতা AI 🖋️</h1>
-            <p id="user-id-display" class="text-center text-xs text-slate-400 mt-2 truncate">Connecting...</p>
+            <div id="user-id-display" class="text-center text-xs text-slate-400 mt-2">Connecting...</div>
         </header>
 
         <!-- Chat Messages Area -->
         <main id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-6 bg-slate-50 rounded-lg">
-            <!-- Messages will be dynamically inserted here -->
+            <!-- Initial bot message -->
             <div class="flex items-start gap-3">
                 <div class="bg-indigo-500 text-white p-2 rounded-full h-8 w-8 flex-shrink-0 flex items-center justify-center text-sm font-bold">AI</div>
                 <div class="bg-indigo-100 text-slate-800 p-3 rounded-lg max-w-xs md:max-w-md">
@@ -74,10 +74,13 @@
                     placeholder="আপনার বার্তা লিখুন..."
                     autocomplete="off"
                     class="flex-1 p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none transition duration-300"
+                    disabled 
                 >
                 <button 
                     type="submit"
-                    class="bg-indigo-600 text-white font-bold py-3 px-5 rounded-lg hover:bg-indigo-700 active:scale-95 transition duration-300 flex items-center gap-2"
+                    id="submit-button"
+                    class="bg-indigo-600 text-white font-bold py-3 px-5 rounded-lg hover:bg-indigo-700 active:scale-95 transition duration-300 flex items-center gap-2 disabled:bg-slate-400 disabled:cursor-not-allowed"
+                    disabled
                 >
                     <span>পাঠান</span>
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-send-fill" viewBox="0 0 16 16">
@@ -96,7 +99,6 @@
         import { getFirestore, collection, addDoc, query, onSnapshot, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- 1. CONFIGURATION ---
-        // Your web app's Firebase configuration provided by the user
         const firebaseConfig = {
             apiKey: "AIzaSyCbZD1X2iXESuwvbFif3m9PZ7xK-bsZ1uc",
             authDomain: "kobitar-khata-oe1bo.firebaseapp.com",
@@ -104,11 +106,10 @@
             projectId: "kobitar-khata-oe1bo",
             storageBucket: "kobitar-khata-oe1bo.firebasestorage.app",
             messagingSenderId: "901122182466",
-            appId: "1:901122182466:web:3626237efc0dfff3948cdb",
-            measurementId: "G-0CM2ZSL1CS"
+            appId: "1:901122182466:web:ce984ed8d16cf2ce948cdb",
+            measurementId: "G-RR98NQ9XZZ"
         };
 
-        // Use the global __app_id if available, otherwise use a default
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-chatbot-app';
 
         // --- 2. INITIALIZATION ---
@@ -120,77 +121,116 @@
         const chatMessages = document.getElementById('chat-messages');
         const messageForm = document.getElementById('message-form');
         const messageInput = document.getElementById('message-input');
+        const submitButton = document.getElementById('submit-button');
         const typingIndicator = document.getElementById('typing-indicator');
         const userIdDisplay = document.getElementById('user-id-display');
 
         let userId = null;
         let messagesCollectionRef = null;
-        let unsubscribeMessages = null;
+        let unsubscribeMessages = null; 
 
         // --- 4. AUTHENTICATION ---
+        
+        // This is the single source of truth for the user's auth state.
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                // User is signed in.
+                // User is authenticated, app is usable.
                 userId = user.uid;
                 userIdDisplay.textContent = `User ID: ${userId}`;
+                messageInput.disabled = false;
+                submitButton.disabled = false;
                 
-                // Set up Firestore references now that we have a user ID
                 messagesCollectionRef = collection(db, 'artifacts', appId, 'users', userId, 'messages');
-                
-                // Start listening for new messages
                 listenForMessages();
             } else {
-                // User is signed out.
-                userIdDisplay.textContent = 'Authenticating...';
-                // Attempt to sign in
-                signInUser();
+                // User is not authenticated. App is unusable.
+                userId = null;
+                messageInput.disabled = true;
+                submitButton.disabled = true;
+                if (unsubscribeMessages) {
+                    unsubscribeMessages();
+                    unsubscribeMessages = null;
+                }
+                // The signInUser function will handle displaying the error message.
             }
         });
         
         async function signInUser() {
+            userIdDisplay.textContent = 'Authenticating...';
             try {
-                // Check if a custom token is provided by the environment
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
-                    // Fallback to anonymous sign-in
                     await signInAnonymously(auth);
                 }
             } catch (error) {
-                console.error("Authentication failed:", error);
-                userIdDisplay.textContent = 'Authentication failed. Please refresh.';
+                console.error("Primary auth attempt failed:", error);
+                if (error.code === 'auth/custom-token-mismatch') {
+                    console.log("Custom token failed, trying anonymous fallback.");
+                    try {
+                        await signInAnonymously(auth);
+                    } catch (anonError) {
+                        console.error("Anonymous fallback also failed:", anonError);
+                        handleAuthError(anonError); // Handle the final, critical error.
+                    }
+                } else {
+                    handleAuthError(error);
+                }
             }
+        }
+
+        function handleAuthError(err) {
+            let errorMessage = '';
+            // Handle the most common and critical error first.
+            if (err.code === 'auth/operation-not-allowed' || err.code === 'auth/admin-restricted-operation') {
+                errorMessage = `
+                    <p class="text-red-500 font-semibold">প্রমাণীকরণ ব্যর্থ হয়েছে।</p>
+                    <p class="text-slate-600 text-xs mt-1">এই অ্যাপটি ব্যবহার করতে, অনুগ্রহ করে আপনার Firebase প্রজেক্টে যান, Authentication -> Sign-in method-এ গিয়ে 'Anonymous' সাইন-ইন পদ্ধতিটি সক্রিয় করুন।</p>
+                `;
+            } else {
+                 errorMessage = `
+                    <p class="text-red-500 font-semibold">প্রমাণীকরণ সম্ভব হচ্ছে না।</p>
+                    <p class="text-slate-600 text-xs mt-1">অনুগ্রহ করে আপনার ইন্টারনেট সংযোগ এবং Firebase কনফিগারেশন পরীক্ষা করুন। বিস্তারিত জানতে কনসোল দেখুন।</p>
+                `;
+            }
+            userIdDisplay.innerHTML = errorMessage;
         }
 
         // --- 5. FIRESTORE & CHAT LOGIC ---
         function listenForMessages() {
             if (!messagesCollectionRef) return;
             
+            if (unsubscribeMessages) {
+                unsubscribeMessages();
+            }
+
             const q = query(messagesCollectionRef, orderBy("timestamp"));
             
-            // onSnapshot listens for real-time updates
             unsubscribeMessages = onSnapshot(q, (snapshot) => {
-                // Clear previous messages to prevent duplication
-                // We only clear messages that are not the initial bot message
-                const initialMessage = chatMessages.querySelector('.flex.items-start.gap-3');
-                chatMessages.innerHTML = '';
-                chatMessages.appendChild(initialMessage);
+                const existingMessages = chatMessages.querySelectorAll('.dynamic-message');
+                existingMessages.forEach(msg => msg.remove());
 
                 snapshot.docs.forEach(doc => {
                     const message = doc.data();
                     displayMessage(message.sender, message.text);
                 });
                 
-                // Scroll to the bottom of the chat window
                 chatMessages.scrollTop = chatMessages.scrollHeight;
             }, (error) => {
                 console.error("Error fetching messages: ", error);
+                if (error.code === 'permission-denied' || error.code === 'missing-or-insufficient-permissions') {
+                    if (!auth.currentUser) {
+                         displayMessage('bot', 'প্রমাণীকরণ ব্যর্থ হয়েছে। বার্তা লোড করা সম্ভব নয়। অনুগ্রহ করে পৃষ্ঠার শীর্ষে থাকা নির্দেশাবলী অনুসরণ করুন।');
+                    } else {
+                        displayMessage('bot', 'ডাটাবেস অনুমতিতে সমস্যা হয়েছে। আপনার Firestore নিরাপত্তা নিয়মাবলী (Security Rules) পরীক্ষা করুন।');
+                    }
+                }
             });
         }
 
         function displayMessage(sender, text) {
             const messageWrapper = document.createElement('div');
-            messageWrapper.className = `flex items-start gap-3 ${sender === 'user' ? 'justify-end' : ''}`;
+            messageWrapper.className = `flex items-start gap-3 dynamic-message ${sender === 'user' ? 'justify-end' : ''}`;
             
             let messageElement;
             if (sender === 'user') {
@@ -200,7 +240,7 @@
                     </div>
                     <div class="bg-blue-500 text-white p-2 rounded-full h-8 w-8 flex-shrink-0 flex items-center justify-center text-sm font-bold">You</div>
                 `;
-            } else { // sender is 'bot'
+            } else {
                 messageElement = `
                     <div class="bg-indigo-500 text-white p-2 rounded-full h-8 w-8 flex-shrink-0 flex items-center justify-center text-sm font-bold">AI</div>
                     <div class="bg-indigo-100 text-slate-800 p-3 rounded-lg max-w-xs md:max-w-md">
@@ -220,7 +260,6 @@
             if (messageText && userId && messagesCollectionRef) {
                 messageInput.value = '';
                 
-                // Save user's message to Firestore
                 try {
                     await addDoc(messagesCollectionRef, {
                         text: messageText,
@@ -228,11 +267,18 @@
                         timestamp: serverTimestamp()
                     });
                     
-                    // Get AI response
                     getAIResponse(messageText);
                 } catch (error) {
                     console.error("Error sending message: ", error);
-                    displayMessage('bot', 'দুঃখিত, আপনার বার্তা পাঠাতে একটি সমস্যা হয়েছে।');
+                     if (error.code === 'permission-denied' || error.code === 'missing-or-insufficient-permissions') {
+                        if (!auth.currentUser) {
+                            displayMessage('bot', 'প্রমাণীকরণ ব্যর্থ হয়েছে। বার্তা পাঠানো সম্ভব নয়।');
+                        } else {
+                            displayMessage('bot', 'বার্তা পাঠানো সম্ভব হচ্ছে না। আপনার Firestore নিরাপত্তা নিয়মাবলী (Security Rules) পরীক্ষা করুন।');
+                        }
+                    } else {
+                        displayMessage('bot', 'দুঃখিত, আপনার বার্তা পাঠাতে একটি সমস্যা হয়েছে।');
+                    }
                 }
             }
         });
@@ -242,7 +288,6 @@
             typingIndicator.classList.remove('hidden');
             chatMessages.scrollTop = chatMessages.scrollHeight;
 
-            // This is the prompt that gives the AI its personality
             const fullPrompt = `You are 'কবিতার খাতা AI', a friendly and knowledgeable AI assistant from Bangladesh who loves Bengali poetry, literature, and culture. Your responses should be in Bengali. Be helpful and engaging. User's query: "${prompt}"`;
 
             const payload = {
@@ -251,7 +296,7 @@
                     parts: [{ text: fullPrompt }]
                 }]
             };
-            const apiKey = ""; // The API key is handled by the environment
+            const apiKey = ""; 
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
             try {
@@ -274,7 +319,6 @@
                     botResponse = result.candidates[0].content.parts[0].text;
                 }
                 
-                // Save bot's response to Firestore
                 await addDoc(messagesCollectionRef, {
                     text: botResponse,
                     sender: 'bot',
@@ -283,12 +327,7 @@
 
             } catch (error) {
                 console.error("Error getting AI response:", error);
-                // Save an error message to Firestore to inform the user
-                await addDoc(messagesCollectionRef, {
-                    text: 'দুঃখিত, একটি প্রযুক্তিগত সমস্যা হয়েছে। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।',
-                    sender: 'bot',
-                    timestamp: serverTimestamp()
-                });
+                displayMessage('bot', 'দুঃখিত, একটি প্রযুক্তিগত সমস্যা হয়েছে। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।');
             } finally {
                 typingIndicator.classList.add('hidden');
             }
